@@ -1,0 +1,6 @@
+{
+  "name": "Sentinel — AI Fraud Detection and Investigation System",
+  "description": "Enterprise-grade financial crime operations platform featuring deterministic fraud rules, statistical anomaly detection, explainable AI case analysis, customer risk profiling, and auditable case management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
