@@ -73,7 +73,99 @@ export class Database {
     this.dataFilePath = path.join(dir, 'sentinel_store.json');
 
     this.initializeDefaultUsers();
-    this.seedInitialData();
+    const loaded = this.loadFromFile();
+    if (!loaded || this.transactions.length === 0) {
+      this.seedInitialData();
+    }
+  }
+
+  public getDeviceCustomerMap(): Map<string, Set<string>> {
+    return this.deviceToCustomerMap;
+  }
+
+  public getDataFilePath(): string {
+    return this.dataFilePath;
+  }
+
+  public persist(): void {
+    this.saveToFile();
+  }
+
+  public saveToFile(): void {
+    try {
+      const payload = {
+        version: '1.0.0',
+        savedAt: new Date().toISOString(),
+        customers: Array.from(this.customers.values()),
+        transactions: this.transactions,
+        assessments: Array.from(this.assessments.entries()),
+        cases: Array.from(this.cases.values()),
+        auditEvents: this.auditEvents,
+        deviceToCustomer: Array.from(this.deviceToCustomerMap.entries()).map(([d, set]) => [d, Array.from(set)]),
+        rules: this.rulesEngine.getRules(),
+        scoringWeights: this.scoringEngine.getWeights(),
+      };
+      const tmpPath = `${this.dataFilePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
+      fs.renameSync(tmpPath, this.dataFilePath);
+    } catch (err) {
+      console.warn('[Database] Failed to persist data to disk:', err);
+    }
+  }
+
+  public loadFromFile(): boolean {
+    try {
+      if (!fs.existsSync(this.dataFilePath)) return false;
+      const raw = fs.readFileSync(this.dataFilePath, 'utf-8');
+      if (!raw || !raw.trim()) return false;
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data.transactions) || !Array.isArray(data.customers)) return false;
+
+      this.customers.clear();
+      for (const c of data.customers) {
+        this.customers.set(c.customerId, c);
+      }
+
+      this.transactions = data.transactions;
+
+      this.assessments.clear();
+      if (Array.isArray(data.assessments)) {
+        for (const [k, v] of data.assessments) {
+          this.assessments.set(k, v);
+        }
+      }
+
+      this.cases.clear();
+      if (Array.isArray(data.cases)) {
+        for (const c of data.cases) {
+          this.cases.set(c.id, c);
+        }
+      }
+
+      this.auditEvents = Array.isArray(data.auditEvents) ? data.auditEvents : [];
+
+      this.deviceToCustomerMap.clear();
+      if (Array.isArray(data.deviceToCustomer)) {
+        for (const [d, custs] of data.deviceToCustomer) {
+          this.deviceToCustomerMap.set(d, new Set(custs));
+        }
+      }
+
+      if (Array.isArray(data.rules)) {
+        for (const r of data.rules) {
+          this.rulesEngine.updateRule(r.id, r);
+        }
+      }
+
+      if (data.scoringWeights) {
+        this.scoringEngine.setWeights(data.scoringWeights);
+      }
+
+      return true;
+    } catch (err) {
+      console.warn('[Database] Failed to load store from disk, falling back to seed:', err);
+      return false;
+    }
   }
 
   private initializeDefaultUsers() {
@@ -136,6 +228,7 @@ export class Database {
     if (this.auditEvents.length > 5000) {
       this.auditEvents.pop();
     }
+    this.persist();
     return event;
   }
 
@@ -816,18 +909,56 @@ export class Database {
     txnInput: Omit<Transaction, 'id'> & { id?: string },
     actor: { id: string; name: string; role: UserRole }
   ): { transaction: Transaction; assessment: RiskAssessment } {
-    // 1. Validation
-    if (!txnInput.customerId || !txnInput.amount || txnInput.amount <= 0) {
-      throw new Error('Validation Error: Customer ID and a positive amount are required.');
+    // 1. Strict Validation
+    if (!txnInput.customerId || typeof txnInput.customerId !== 'string' || !txnInput.customerId.trim()) {
+      throw new Error('Validation Error: Valid customer ID is required.');
     }
 
-    // 2. Duplicate Detection
+    if (
+      txnInput.amount === undefined ||
+      txnInput.amount === null ||
+      typeof txnInput.amount !== 'number' ||
+      isNaN(txnInput.amount) ||
+      !isFinite(txnInput.amount) ||
+      txnInput.amount <= 0
+    ) {
+      throw new Error('Validation Error: A positive finite numerical amount is required.');
+    }
+
+    if (txnInput.amount > 10000000) {
+      throw new Error('Validation Error: Transaction amount exceeds single transaction velocity ceiling ($10,000,000).');
+    }
+
+    if (txnInput.timestamp && isNaN(new Date(txnInput.timestamp).getTime())) {
+      throw new Error('Validation Error: Timestamp must be a valid ISO 8601 date string.');
+    }
+
+    if (txnInput.sourceLocation) {
+      const { latitude, longitude } = txnInput.sourceLocation;
+      if (
+        typeof latitude !== 'number' ||
+        isNaN(latitude) ||
+        latitude < -90 ||
+        latitude > 90 ||
+        typeof longitude !== 'number' ||
+        isNaN(longitude) ||
+        longitude < -180 ||
+        longitude > 180
+      ) {
+        throw new Error('Validation Error: Geographic coordinates out of valid range (-90 to 90 lat, -180 to 180 lon).');
+      }
+    }
+
+    const txTimeStr = txnInput.timestamp || new Date().toISOString();
+    const txTime = new Date(txTimeStr).getTime();
+
+    // 2. Duplicate Detection (Idempotency)
     const duplicate = this.transactions.find(
       (t) =>
         t.customerId === txnInput.customerId &&
         Math.abs(t.amount - txnInput.amount) < 0.001 &&
         t.merchantName === txnInput.merchantName &&
-        Math.abs(new Date(t.timestamp).getTime() - new Date(txnInput.timestamp).getTime()) < 3000 // within 3s
+        Math.abs(new Date(t.timestamp).getTime() - txTime) < 3000 // within 3s
     );
 
     if (duplicate) {
@@ -842,7 +973,7 @@ export class Database {
       id,
       accountNumber: txnInput.accountNumber || `ACCT-${txnInput.customerId.replace('CUST-', '')}-****-9900`,
       currency: txnInput.currency || 'USD',
-      timestamp: txnInput.timestamp || new Date().toISOString(),
+      timestamp: txTimeStr,
       channel: txnInput.channel || 'WEB',
       transactionType: txnInput.transactionType || 'CARD_PURCHASE',
       status: txnInput.status || 'APPROVED',
@@ -872,6 +1003,23 @@ export class Database {
         lastActive: txn.timestamp,
       };
       this.customers.set(txn.customerId, customer);
+    }
+
+    // Dynamic customer behavioral baseline telemetry update
+    customer.historicalTxnCount += 1;
+    customer.totalVolumeUSD += txn.amount;
+    customer.averageTxnAmount = Math.round(customer.totalVolumeUSD / customer.historicalTxnCount);
+    customer.maxTxnAmount = Math.max(customer.maxTxnAmount, Math.round(txn.amount));
+    customer.lastActive = txn.timestamp;
+
+    if (txn.deviceId && !customer.knownDevices.includes(txn.deviceId)) {
+      customer.knownDevices.push(txn.deviceId);
+    }
+    if (txn.sourceLocation && !customer.frequentLocations.some((l) => l.city === txn.sourceLocation.city)) {
+      customer.frequentLocations.push({ city: txn.sourceLocation.city, country: txn.sourceLocation.country });
+    }
+    if (txn.merchantName && !customer.topMerchants.includes(txn.merchantName)) {
+      customer.topMerchants.push(txn.merchantName);
     }
 
     // Device map update
@@ -931,6 +1079,7 @@ export class Database {
       );
     }
 
+    this.persist();
     return { transaction: txn, assessment };
   }
 

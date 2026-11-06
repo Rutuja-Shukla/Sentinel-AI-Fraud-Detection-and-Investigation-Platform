@@ -146,6 +146,20 @@ router.get('/fraud/alerts', (req: Request, res: Response) => {
 router.post('/fraud/analyze', (req: Request, res: Response) => {
   try {
     const txn = req.body;
+    if (!txn || !txn.customerId || typeof txn.customerId !== 'string' || !txn.customerId.trim()) {
+      return res.status(400).json({ error: 'Validation Error: customerId is required.' });
+    }
+    if (
+      txn.amount === undefined ||
+      txn.amount === null ||
+      typeof txn.amount !== 'number' ||
+      isNaN(txn.amount) ||
+      !isFinite(txn.amount) ||
+      txn.amount <= 0
+    ) {
+      return res.status(400).json({ error: 'Validation Error: amount must be a positive finite number.' });
+    }
+
     const cust = db.customers.get(txn.customerId) || {
       customerId: txn.customerId,
       accountNumber: txn.accountNumber || 'ACCT-DEMO-991',
@@ -155,9 +169,9 @@ router.post('/fraud/analyze', (req: Request, res: Response) => {
       averageTxnAmount: 250,
       stdDevTxnAmount: 120,
       maxTxnAmount: 1500,
-      knownDevices: [txn.deviceId],
-      frequentLocations: [txn.sourceLocation],
-      topMerchants: [txn.merchantName],
+      knownDevices: txn.deviceId ? [txn.deviceId] : [],
+      frequentLocations: txn.sourceLocation ? [txn.sourceLocation] : [],
+      topMerchants: txn.merchantName ? [txn.merchantName] : [],
       historicalAlertCount: 0,
       openCasesCount: 0,
       totalVolumeUSD: 5000,
@@ -165,7 +179,7 @@ router.post('/fraud/analyze', (req: Request, res: Response) => {
     };
 
     const history = db.transactions.filter((t) => t.customerId === txn.customerId);
-    const matchedRules = db.rulesEngine.evaluate(txn, cust, history, (db as any).deviceToCustomerMap);
+    const matchedRules = db.rulesEngine.evaluate(txn, cust, history, db.getDeviceCustomerMap());
     const anomaly = db.anomalyEngine.evaluate(txn, cust, history);
     const assessment = db.scoringEngine.assess(txn, matchedRules, anomaly);
 

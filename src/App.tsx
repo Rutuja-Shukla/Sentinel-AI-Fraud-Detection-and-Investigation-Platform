@@ -101,8 +101,8 @@ export default function App() {
 
   const loadAlerts = () => {
     setAlertsLoading(true);
-    fetch('/api/fraud/alerts')
-      .then((res) => res.json())
+    api
+      .getAlerts()
       .then((res) => setAlerts(res.alerts || []))
       .catch((err) => console.error(err))
       .finally(() => setAlertsLoading(false));

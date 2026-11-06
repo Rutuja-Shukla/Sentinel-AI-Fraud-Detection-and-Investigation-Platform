@@ -280,6 +280,14 @@ export const api = {
     return res.json();
   },
 
+  // Fraud Alerts
+  async getAlerts(level?: string) {
+    const query = level ? `?level=${encodeURIComponent(level)}` : '';
+    const res = await fetch(`/api/fraud/alerts${query}`);
+    if (!res.ok) throw new Error('Failed to fetch fraud alerts');
+    return res.json();
+  },
+
   // Fraud Rules
   async getRules(): Promise<{ rules: FraudRuleConfig[]; scoringWeights: any }> {
     const res = await fetch('/api/fraud/rules');
